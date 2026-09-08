@@ -87,14 +87,9 @@ export default function ShiftApp() {
   ).filter((name) => name && name !== "管理者" && name !== "未定");
 
   useEffect(() => {
-    const savedUser = localStorage.getItem("shift_app_current_user");
-    const savedAdmin = localStorage.getItem("shift_app_is_admin") === "true";
-    if (savedAdmin) {
-      setIsAdmin(true);
-      setCurrentUser("管理者");
-    } else if (savedUser) {
-      setCurrentUser(savedUser);
-    }
+    // 起動時は常にログイン画面から開始するため、前回のログイン保持を読み込まない
+    setCurrentUser(null);
+    setIsAdmin(false);
     fetchStaffSettings();
   }, []);
 
