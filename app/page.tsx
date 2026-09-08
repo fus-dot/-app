@@ -319,6 +319,25 @@ export default function ShiftApp() {
     fetchAllData();
   };
 
+  // 管理者用：各スタッフの希望勤務数を一括更新
+  const handleAdminUpdateStaffTarget = async (staffName: string, newTarget: number) => {
+    if (!isAdmin) return;
+    const val = Math.max(0, newTarget);
+
+    setStaffSettings((prev) =>
+      prev.map((s) => (s.user_name === staffName ? { ...s, target_shifts: val } : s))
+    );
+
+    const { error } = await supabase.from("staff_settings").upsert({
+      user_name: staffName,
+      target_shifts: val,
+    });
+
+    if (error) {
+      alert("更新エラー: " + error.message);
+    }
+  };
+
   const handleSaveTargetShifts = async (newVal: number) => {
     if (!currentUser || currentUser === "管理者") return;
     setTargetShifts(newVal);
@@ -756,7 +775,7 @@ export default function ShiftApp() {
   // メイン画面
   // -----------------------------------------------------------------
   return (
-    <main className="min-h-screen bg-gray-50 p-4 max-w-4xl mx-auto pb-24 text-gray-800">
+    <main className="min-h-screen bg-gray-50 p-4 max-w-7xl mx-auto pb-24 text-gray-800">
       {/* ログインバー */}
       <header className="mb-6 bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
         <div className="flex items-center justify-between border-b pb-3 mb-3">
@@ -849,34 +868,55 @@ export default function ShiftApp() {
 
         {isAdmin && (
           <div className="pt-1 text-xs">
-            <span className="font-semibold text-gray-500 block mb-1.5">登録スタッフ一覧・削除:</span>
+            <span className="font-semibold text-gray-500 block mb-1.5">
+              スタッフ管理（希望勤務数の調整・削除）:
+            </span>
             {knownStaff.length === 0 ? (
               <p className="text-gray-400">現在登録されているスタッフはいません。</p>
             ) : (
-              <div className="flex flex-wrap gap-1.5">
-                {knownStaff.map((staff) => (
-                  <div
-                    key={staff}
-                    className="flex items-center bg-gray-100 border border-gray-200 rounded-lg pl-2.5 pr-1 py-1 text-xs"
-                  >
-                    <span className="font-medium mr-1.5">{staff}</span>
-                    <button
-                      onClick={() => handleDeleteStaff(staff)}
-                      disabled={isProcessing}
-                      title="このスタッフを削除"
-                      className="text-gray-400 hover:text-red-600 hover:bg-red-50 rounded p-0.5 font-bold transition"
+              <div className="flex flex-wrap gap-2">
+                {knownStaff.map((staff) => {
+                  const setting = staffSettings.find((s) => s.user_name === staff);
+                  const currentTgt = setting ? setting.target_shifts : 6;
+
+                  return (
+                    <div
+                      key={staff}
+                      className="flex items-center gap-1.5 bg-gray-100 border border-gray-200 rounded-lg pl-2.5 pr-1.5 py-1 text-xs"
                     >
-                      ✕
-                    </button>
-                  </div>
-                ))}
+                      <span className="font-bold text-gray-800">{staff}</span>
+                      <div className="flex items-center gap-1 ml-1 bg-white px-1.5 py-0.5 rounded border border-gray-300">
+                        <span className="text-[10px] text-gray-500">上限:</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max={daysInMonth}
+                          value={currentTgt}
+                          onChange={(e) =>
+                            handleAdminUpdateStaffTarget(staff, Number(e.target.value))
+                          }
+                          className="w-10 text-center font-bold text-blue-700 outline-none"
+                        />
+                        <span className="text-[10px] text-gray-500">回</span>
+                      </div>
+                      <button
+                        onClick={() => handleDeleteStaff(staff)}
+                        disabled={isProcessing}
+                        title="このスタッフを削除"
+                        className="text-gray-400 hover:text-red-600 hover:bg-red-50 rounded p-1 font-bold transition ml-1"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
         )}
       </header>
 
-      {/* カレンダー */}
+      {/* カレンダー（スタッフ個人の希望入力用） */}
       {!isAdmin && (
         <div className="max-w-md mx-auto mb-10">
           <p className="text-center text-xs font-semibold text-gray-500 mb-2">
@@ -945,13 +985,150 @@ export default function ShiftApp() {
         </div>
       )}
 
-      {/* 確定シフト表 */}
+      {/* ─────────────────────────────────────────────────────────── */}
+      {/* 新機能：手書き表スタイルの全体マトリクス表（全員閲覧可能） */}
+      {/* ─────────────────────────────────────────────────────────── */}
+      <section className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm mb-8">
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <h2 className="text-base sm:text-lg font-bold text-gray-900 flex items-center gap-2">
+              📋 全体シフト・希望一覧表（{currentYear}年{currentMonth}月）
+            </h2>
+            <p className="text-xs text-gray-500 mt-0.5">
+              各スタッフの確定シフト（A/B勤）と希望休（×, A×, B×, 特休）が全員分ひと目で確認できます。
+            </p>
+          </div>
+          <div className="flex gap-2 text-[11px]">
+            <span className="flex items-center gap-1 font-semibold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+              A / B : 確定勤務
+            </span>
+            <span className="flex items-center gap-1 font-semibold text-red-600 bg-red-50 px-2 py-0.5 rounded border border-red-200">
+              × : 全休希望
+            </span>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto border border-gray-300 rounded-lg shadow-2xs">
+          <table className="min-w-full text-center border-collapse border border-gray-300 text-xs">
+            <thead className="bg-gray-100 text-gray-700 sticky top-0 z-10 select-none">
+              <tr>
+                <th className="border border-gray-300 p-2 min-w-[100px] w-28 text-left pl-3 bg-gray-200 sticky left-0 z-20 shadow-xs font-bold">
+                  氏名
+                </th>
+                {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((d) => {
+                  const dayOfWeek = new Date(currentYear, currentMonth - 1, d).getDay();
+                  const isSun = dayOfWeek === 0;
+                  const isSat = dayOfWeek === 6;
+
+                  return (
+                    <th
+                      key={d}
+                      className={`border border-gray-300 px-1.5 py-1.5 min-w-[32px] font-bold ${
+                        isSun
+                          ? "bg-red-50 text-red-600"
+                          : isSat
+                          ? "bg-blue-50 text-blue-600"
+                          : "bg-gray-100 text-gray-700"
+                      }`}
+                    >
+                      <div>{d}</div>
+                      <div className="text-[10px] font-normal">
+                        {["日", "月", "火", "水", "木", "金", "土"][dayOfWeek]}
+                      </div>
+                    </th>
+                  );
+                })}
+                <th className="border border-gray-300 p-2 min-w-[80px] bg-gray-200 font-bold">
+                  確定 / 上限
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {knownStaff.map((staff) => {
+                const assignedCount = displayedShifts.filter((c) => c.assigned_user === staff).length;
+                const targetCount = staffSettings.find((s) => s.user_name === staff)?.target_shifts || 6;
+                const isOver = assignedCount > targetCount;
+
+                return (
+                  <tr key={staff} className="hover:bg-gray-50 transition-colors">
+                    {/* スタッフ名（横スクロール時も左側に固定表示） */}
+                    <td className="border border-gray-300 p-2 font-bold text-gray-800 bg-white sticky left-0 z-10 shadow-xs text-left pl-3 truncate">
+                      {staff}
+                    </td>
+
+                    {/* 1日〜月末のマス目 */}
+                    {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((d) => {
+                      // 1. 確定シフト（A勤 / B勤）
+                      const assignedA = displayedShifts.some(
+                        (c) => c.date === d && c.shift_type === "A" && c.assigned_user === staff
+                      );
+                      const assignedB = displayedShifts.some(
+                        (c) => c.date === d && c.shift_type === "B" && c.assigned_user === staff
+                      );
+
+                      // 2. 提出希望（全休, A×, B×, 特別休）
+                      const req = allRequests.find(
+                        (r) => r.date === d && r.user_name === staff
+                      )?.request_type;
+
+                      return (
+                        <td
+                          key={d}
+                          className="border border-gray-300 p-1 min-w-[32px] h-9 text-center align-middle font-bold text-sm"
+                        >
+                          {assignedA && (
+                            <span className="inline-block w-6 h-6 leading-6 rounded bg-blue-600 text-white shadow-2xs">
+                              A
+                            </span>
+                          )}
+                          {assignedB && (
+                            <span className="inline-block w-6 h-6 leading-6 rounded bg-indigo-600 text-white shadow-2xs">
+                              B
+                            </span>
+                          )}
+                          {!assignedA && !assignedB && req && (
+                            <span
+                              className={`text-xs ${
+                                req === "全休"
+                                  ? "text-red-500 font-extrabold text-base"
+                                  : req === "A×"
+                                  ? "text-orange-500 text-[11px]"
+                                  : req === "B×"
+                                  ? "text-amber-500 text-[11px]"
+                                  : "text-purple-600 text-[10px]"
+                              }`}
+                            >
+                              {req === "全休" ? "×" : req}
+                            </span>
+                          )}
+                        </td>
+                      );
+                    })}
+
+                    {/* 確定回数 / 希望上限 */}
+                    <td className="border border-gray-300 p-2 font-bold whitespace-nowrap bg-gray-50 text-xs">
+                      <span className={isOver ? "text-red-600 font-extrabold" : "text-blue-600"}>
+                        {assignedCount}
+                      </span>
+                      <span className="text-gray-400"> / {targetCount}回</span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {/* ─────────────────────────────────────────────────────────── */}
+      {/* 従来の「日付ごと縦並びシフト表（調整・自動生成用）」 */}
+      {/* ─────────────────────────────────────────────────────────── */}
       <section className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm mb-6">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-5">
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="text-lg font-bold text-gray-800">
-                シフト表（{currentYear}年{currentMonth}月）
+              <h2 className="text-base sm:text-lg font-bold text-gray-800">
+                シフト割当・編集（日別）
               </h2>
               {isEditingDraft && (
                 <span className="text-[11px] bg-amber-100 text-amber-800 font-bold px-2 py-0.5 rounded border border-amber-200">
@@ -962,7 +1139,7 @@ export default function ShiftApp() {
             <p className="text-xs text-gray-500 mt-0.5">
               {isAdmin
                 ? "自動生成後に表内のプルダウンから微調整し、最後に「確定して保存」を押してください。"
-                : "全体の割り当て状況を確認できます"}
+                : "日付順のシフト一覧です"}
             </p>
           </div>
 
@@ -1008,35 +1185,8 @@ export default function ShiftApp() {
           )}
         </div>
 
-        {/* 勤務回数状況 */}
-        <div className="mb-4 bg-gray-50 p-3 rounded-lg border text-xs">
-          <div className="font-bold text-gray-600 mb-1">
-            {currentYear}年{currentMonth}月の{isEditingDraft ? "現在の編集後回数" : "確定回数"} / 希望上限回数:
-          </div>
-          <div className="flex flex-wrap gap-2.5">
-            {knownStaff.map((staff) => {
-              const actual = displayedShifts.filter((c) => c.assigned_user === staff).length;
-              const target = staffSettings.find((s) => s.user_name === staff)?.target_shifts || 6;
-              const isOver = actual > target;
-
-              return (
-                <div
-                  key={staff}
-                  className={`px-2.5 py-1 rounded border shadow-2xs ${
-                    isOver ? "bg-red-50 border-red-300 text-red-700" : "bg-white text-gray-700"
-                  }`}
-                >
-                  <span className="font-medium">{staff}: </span>
-                  <strong className={isOver ? "text-red-700" : "text-blue-600"}>{actual}</strong>
-                  <span className="text-gray-400"> / {target}回</span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
         {/* シフト表 */}
-        <div className="overflow-x-auto border border-gray-200 rounded-lg max-h-[500px]">
+        <div className="overflow-x-auto border border-gray-200 rounded-lg max-h-[450px]">
           <table className="min-w-full text-xs text-center border-collapse">
             <thead className="bg-gray-100 text-gray-600 sticky top-0 z-10">
               <tr>
