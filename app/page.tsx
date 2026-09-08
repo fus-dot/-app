@@ -74,7 +74,11 @@ export default function ShiftApp() {
   const [staffSettings, setStaffSettings] = useState<StaffSetting[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
+
+  // 交代・交換用 state
+  const [swapMode, setSwapMode] = useState<"give" | "trade">("give");
   const [swapTargetUser, setSwapTargetUser] = useState<string>("");
+  const [tradeTargetShiftKey, setTradeTargetShiftKey] = useState<string>(""); // "date_shiftType"
 
   const daysInMonth = new Date(currentYear, currentMonth, 0).getDate();
   const firstDayOfWeek = new Date(currentYear, currentMonth - 1, 1).getDay();
@@ -87,7 +91,7 @@ export default function ShiftApp() {
   ).filter((name) => name && name !== "管理者" && name !== "未定");
 
   useEffect(() => {
-    // 起動時は常にログイン画面から開始するため、前回のログイン保持を読み込まない
+    // 起動時は常にログイン画面から開始
     setCurrentUser(null);
     setIsAdmin(false);
     fetchStaffSettings();
@@ -107,7 +111,6 @@ export default function ShiftApp() {
   const fetchAllData = async () => {
     setLoading(true);
 
-    // 1. 指定年月の希望を取得
     const { data: allData } = await supabase
       .from("shift_requests")
       .select("user_name, year, month, date, request_type")
@@ -130,7 +133,6 @@ export default function ShiftApp() {
       setRequests({});
     }
 
-    // 2. 指定年月の確定シフトを取得
     const { data: confData } = await supabase
       .from("confirmed_shifts")
       .select("id, year, month, date, shift_type, assigned_user")
@@ -147,14 +149,13 @@ export default function ShiftApp() {
     }
     setIsEditingDraft(false);
 
-    // 3. 指定年月の変更履歴ログを取得
     const { data: logData } = await supabase
       .from("shift_logs")
       .select("id, year, month, action_type, description, created_at")
       .eq("year", currentYear)
       .eq("month", currentMonth)
       .order("created_at", { ascending: false })
-      .limit(20);
+      .limit(25);
 
     if (logData) {
       setLogs(logData as ShiftLog[]);
@@ -200,8 +201,6 @@ export default function ShiftApp() {
     if (staffPasswordInput === correctPassword) {
       setIsAdmin(false);
       setCurrentUser(selectedStaffForAuth);
-      localStorage.setItem("shift_app_is_admin", "false");
-      localStorage.setItem("shift_app_current_user", selectedStaffForAuth);
       setSelectedStaffForAuth(null);
       setStaffPasswordInput("");
     } else {
@@ -213,8 +212,6 @@ export default function ShiftApp() {
     if (adminPasswordInput === "admin123") {
       setIsAdmin(true);
       setCurrentUser("管理者");
-      localStorage.setItem("shift_app_is_admin", "true");
-      localStorage.setItem("shift_app_current_user", "管理者");
       setAdminPasswordInput("");
     } else {
       alert("管理者パスワードが正しくありません。");
@@ -226,8 +223,6 @@ export default function ShiftApp() {
     setCurrentUser(null);
     setSelectedStaffForAuth(null);
     setStaffPasswordInput("");
-    localStorage.removeItem("shift_app_is_admin");
-    localStorage.removeItem("shift_app_current_user");
     fetchStaffSettings();
   };
 
@@ -314,7 +309,6 @@ export default function ShiftApp() {
     fetchAllData();
   };
 
-  // 管理者用：各スタッフの希望勤務数を一括更新
   const handleAdminUpdateStaffTarget = async (staffName: string, newTarget: number) => {
     if (!isAdmin) return;
     const val = Math.max(0, newTarget);
@@ -375,9 +369,10 @@ export default function ShiftApp() {
     fetchAllData();
   };
 
-  const handleDirectSwap = async (shift: ConfirmedShift) => {
+  // 1. 勤務をあげる（単一の譲渡）
+  const handleGiveShift = async (myShift: ConfirmedShift) => {
     if (!swapTargetUser) {
-      alert("交代先のスタッフを選択してください。");
+      alert("譲渡先のスタッフを選択してください。");
       return;
     }
     if (swapTargetUser === currentUser) {
@@ -386,28 +381,86 @@ export default function ShiftApp() {
     }
 
     const ok = confirm(
-      `${selectedDate}日の【${shift.shift_type}勤】を「${swapTargetUser}」さんに交代しますか？`
+      `${myShift.date}日の【${myShift.shift_type}勤】を「${swapTargetUser}」さんに譲渡しますか？`
     );
     if (!ok) return;
 
+    setIsProcessing(true);
     const { error } = await supabase
       .from("confirmed_shifts")
       .update({ assigned_user: swapTargetUser })
       .eq("year", currentYear)
       .eq("month", currentMonth)
-      .eq("date", shift.date)
-      .eq("shift_type", shift.shift_type);
+      .eq("date", myShift.date)
+      .eq("shift_type", myShift.shift_type);
+
+    setIsProcessing(false);
 
     if (error) {
-      alert("交代エラー: " + error.message);
+      alert("エラー: " + error.message);
     } else {
       await insertLog(
-        "勤務交代",
-        `${shift.date}日 ${shift.shift_type}勤: ${currentUser} → ${swapTargetUser}`
+        "勤務譲渡",
+        `${myShift.date}日 ${myShift.shift_type}勤: ${currentUser} → ${swapTargetUser}`
       );
-
-      alert("交代が完了しました！");
+      alert("勤務の譲渡が完了しました！");
       setSwapTargetUser("");
+      setSelectedDate(null);
+      fetchAllData();
+    }
+  };
+
+  // 2. 勤務を交換する（1対1トレード）
+  const handleTradeShift = async (myShift: ConfirmedShift) => {
+    if (!swapTargetUser) {
+      alert("交換相手のスタッフを選択してください。");
+      return;
+    }
+    if (!tradeTargetShiftKey) {
+      alert("交換対象とする相手の勤務日を選択してください。");
+      return;
+    }
+
+    const [tDateStr, tShiftType] = tradeTargetShiftKey.split("_");
+    const targetDate = Number(tDateStr);
+
+    const ok = confirm(
+      `以下の内容で勤務を交換しますか？\n\n・あなたの勤務: ${myShift.date}日(${myShift.shift_type}勤) ➔ ${swapTargetUser}さんへ\n・相手の勤務: ${targetDate}日(${tShiftType}勤) ➔ あなたへ`
+    );
+    if (!ok) return;
+
+    setIsProcessing(true);
+
+    // 自分の枠を相手に渡す
+    const { error: err1 } = await supabase
+      .from("confirmed_shifts")
+      .update({ assigned_user: swapTargetUser })
+      .eq("year", currentYear)
+      .eq("month", currentMonth)
+      .eq("date", myShift.date)
+      .eq("shift_type", myShift.shift_type);
+
+    // 相手の枠を自分に渡す
+    const { error: err2 } = await supabase
+      .from("confirmed_shifts")
+      .update({ assigned_user: currentUser })
+      .eq("year", currentYear)
+      .eq("month", currentMonth)
+      .eq("date", targetDate)
+      .eq("shift_type", tShiftType);
+
+    setIsProcessing(false);
+
+    if (err1 || err2) {
+      alert("交換処理中にエラーが発生しました。");
+    } else {
+      await insertLog(
+        "シフト交換",
+        `${currentUser}(${myShift.date}日 ${myShift.shift_type}勤) ⇄ ${swapTargetUser}(${targetDate}日 ${tShiftType}勤)`
+      );
+      alert("勤務の交換が完了しました！");
+      setSwapTargetUser("");
+      setTradeTargetShiftKey("");
       setSelectedDate(null);
       fetchAllData();
     }
@@ -590,6 +643,11 @@ export default function ShiftApp() {
   const displayedShifts = isAdmin ? draftShifts : confirmedShifts;
   const myAssignedInSelected = confirmedShifts.filter(
     (c) => c.date === selectedDate && c.assigned_user === currentUser
+  );
+
+  // 選択相手の当月の全シフト一覧（交換先候補）
+  const targetUserShifts = confirmedShifts.filter(
+    (c) => c.assigned_user === swapTargetUser && swapTargetUser !== ""
   );
 
   // -----------------------------------------------------------------
@@ -915,7 +973,7 @@ export default function ShiftApp() {
       {!isAdmin && (
         <div className="max-w-md mx-auto mb-10">
           <p className="text-center text-xs font-semibold text-gray-500 mb-2">
-            カレンダーの日付をタップして希望を入力してください
+            カレンダーの日付をタップして希望入力・勤務交代を行えます
           </p>
           <div className="grid grid-cols-7 gap-1.5 bg-white p-3.5 rounded-xl shadow-sm border border-gray-200">
             {["日", "月", "火", "水", "木", "金", "土"].map((day, idx) => (
@@ -942,7 +1000,12 @@ export default function ShiftApp() {
               return (
                 <button
                   key={date}
-                  onClick={() => setSelectedDate(date)}
+                  onClick={() => {
+                    setSelectedDate(date);
+                    setSwapMode("give");
+                    setSwapTargetUser("");
+                    setTradeTargetShiftKey("");
+                  }}
                   className="aspect-square flex flex-col items-center justify-between p-1 border border-gray-100 rounded-lg hover:bg-gray-50 transition relative"
                 >
                   <span className="text-xs font-medium text-gray-600">{date}</span>
@@ -980,9 +1043,7 @@ export default function ShiftApp() {
         </div>
       )}
 
-      {/* ─────────────────────────────────────────────────────────── */}
-      {/* 新機能：手書き表スタイルの全体マトリクス表（全員閲覧可能） */}
-      {/* ─────────────────────────────────────────────────────────── */}
+      {/* 全体マトリクス表 */}
       <section className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm mb-8">
         <div className="flex items-center justify-between mb-3">
           <div>
@@ -1046,14 +1107,11 @@ export default function ShiftApp() {
 
                 return (
                   <tr key={staff} className="hover:bg-gray-50 transition-colors">
-                    {/* スタッフ名（横スクロール時も左側に固定表示） */}
                     <td className="border border-gray-300 p-2 font-bold text-gray-800 bg-white sticky left-0 z-10 shadow-xs text-left pl-3 truncate">
                       {staff}
                     </td>
 
-                    {/* 1日〜月末のマス目 */}
                     {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((d) => {
-                      // 1. 確定シフト（A勤 / B勤）
                       const assignedA = displayedShifts.some(
                         (c) => c.date === d && c.shift_type === "A" && c.assigned_user === staff
                       );
@@ -1061,7 +1119,6 @@ export default function ShiftApp() {
                         (c) => c.date === d && c.shift_type === "B" && c.assigned_user === staff
                       );
 
-                      // 2. 提出希望（全休, A×, B×, 特別休）
                       const req = allRequests.find(
                         (r) => r.date === d && r.user_name === staff
                       )?.request_type;
@@ -1100,7 +1157,6 @@ export default function ShiftApp() {
                       );
                     })}
 
-                    {/* 確定回数 / 希望上限 */}
                     <td className="border border-gray-300 p-2 font-bold whitespace-nowrap bg-gray-50 text-xs">
                       <span className={isOver ? "text-red-600 font-extrabold" : "text-blue-600"}>
                         {assignedCount}
@@ -1115,9 +1171,7 @@ export default function ShiftApp() {
         </div>
       </section>
 
-      {/* ─────────────────────────────────────────────────────────── */}
-      {/* 従来の「日付ごと縦並びシフト表（調整・自動生成用）」 */}
-      {/* ─────────────────────────────────────────────────────────── */}
+      {/* 日別シフト表 */}
       <section className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm mb-6">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-5">
           <div>
@@ -1180,7 +1234,6 @@ export default function ShiftApp() {
           )}
         </div>
 
-        {/* シフト表 */}
         <div className="overflow-x-auto border border-gray-200 rounded-lg max-h-[450px]">
           <table className="min-w-full text-xs text-center border-collapse">
             <thead className="bg-gray-100 text-gray-600 sticky top-0 z-10">
@@ -1317,7 +1370,9 @@ export default function ShiftApp() {
                   <div className="flex items-center gap-2 overflow-hidden">
                     <span
                       className={`text-[9px] font-bold px-1.5 py-0.5 rounded shrink-0 ${
-                        item.action_type === "勤務交代"
+                        item.action_type === "シフト交換"
+                          ? "bg-purple-100 text-purple-800"
+                          : item.action_type === "勤務譲渡"
                           ? "bg-amber-100 text-amber-800"
                           : item.action_type === "シフト確定"
                           ? "bg-emerald-100 text-emerald-800"
@@ -1340,31 +1395,71 @@ export default function ShiftApp() {
         )}
       </section>
 
-      {/* 希望選択モーダル */}
+      {/* ─────────────────────────────────────────────────────────── */}
+      {/* 希望選択＆勤務交代モーダル */}
+      {/* ─────────────────────────────────────────────────────────── */}
       {selectedDate !== null && !isAdmin && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-xl p-5 w-full max-w-sm shadow-lg">
+          <div className="bg-white rounded-xl p-5 w-full max-w-sm shadow-lg max-h-[90vh] overflow-y-auto">
             <h3 className="text-base font-bold text-gray-800 mb-3 text-center">
               {currentMonth}月{selectedDate}日の設定（{currentUser}）
             </h3>
 
+            {/* 自分の確定勤務がある場合：交代・交換セクション */}
             {myAssignedInSelected.length > 0 && (
-              <div className="mb-4 p-3 bg-amber-50 rounded-lg border border-amber-200">
-                <p className="text-xs font-bold text-amber-900 mb-1.5">
-                  🔄 個人間での勤務交代（代理操作）:
-                </p>
+              <div className="mb-4 p-3.5 bg-amber-50 rounded-xl border border-amber-200">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-bold text-amber-950 flex items-center gap-1">
+                    🔄 勤務の交代・交換
+                  </span>
+                </div>
+
+                {/* モード切替タブ */}
+                <div className="flex bg-amber-100/70 p-0.5 rounded-lg mb-3">
+                  <button
+                    type="button"
+                    onClick={() => setSwapMode("give")}
+                    className={`flex-1 py-1 text-xs font-bold rounded-md transition ${
+                      swapMode === "give"
+                        ? "bg-white text-amber-900 shadow-xs"
+                        : "text-amber-700 hover:text-amber-900"
+                    }`}
+                  >
+                    勤務をあげる（譲渡）
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSwapMode("trade")}
+                    className={`flex-1 py-1 text-xs font-bold rounded-md transition ${
+                      swapMode === "trade"
+                        ? "bg-white text-purple-900 shadow-xs"
+                        : "text-amber-700 hover:text-amber-900"
+                    }`}
+                  >
+                    相手の勤務と交換
+                  </button>
+                </div>
+
                 {myAssignedInSelected.map((shift, idx) => (
-                  <div key={idx} className="space-y-2">
-                    <p className="text-xs text-gray-700">
-                      担当: <strong>{shift.shift_type}勤</strong>
+                  <div key={idx} className="space-y-2.5">
+                    <p className="text-xs font-bold text-gray-800 bg-white/70 p-1.5 rounded border border-amber-200">
+                      あなたの担当: <span className="text-blue-700">{shift.shift_type}勤</span>
                     </p>
-                    <div className="flex gap-2">
+
+                    {/* 共通: 相手の選択 */}
+                    <div>
+                      <label className="text-[11px] font-semibold text-gray-600 block mb-1">
+                        {swapMode === "give" ? "① 譲渡相手を選択:" : "① 交換相手を選択:"}
+                      </label>
                       <select
                         value={swapTargetUser}
-                        onChange={(e) => setSwapTargetUser(e.target.value)}
-                        className="border border-gray-300 text-xs rounded px-2 py-1 flex-1 bg-white"
+                        onChange={(e) => {
+                          setSwapTargetUser(e.target.value);
+                          setTradeTargetShiftKey("");
+                        }}
+                        className="w-full border border-gray-300 text-xs rounded-lg px-2.5 py-1.5 bg-white font-medium"
                       >
-                        <option value="">交代相手を選択</option>
+                        <option value="">相手のスタッフを選択</option>
                         {knownStaff
                           .filter((s) => s !== currentUser)
                           .map((s) => (
@@ -1373,18 +1468,59 @@ export default function ShiftApp() {
                             </option>
                           ))}
                       </select>
-                      <button
-                        onClick={() => handleDirectSwap(shift)}
-                        className="bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold px-3 py-1 rounded shadow-sm transition"
-                      >
-                        交代確定
-                      </button>
                     </div>
+
+                    {/* 交換モード時のみ: 相手のどのシフトと交換するかを選択 */}
+                    {swapMode === "trade" && swapTargetUser && (
+                      <div>
+                        <label className="text-[11px] font-semibold text-gray-600 block mb-1">
+                          ② {swapTargetUser} さんの担当枠から選択:
+                        </label>
+                        {targetUserShifts.length === 0 ? (
+                          <p className="text-[11px] text-red-500 bg-white p-2 rounded border border-red-200">
+                            ※{swapTargetUser}さんは今月担当している勤務枠がありません。
+                          </p>
+                        ) : (
+                          <select
+                            value={tradeTargetShiftKey}
+                            onChange={(e) => setTradeTargetShiftKey(e.target.value)}
+                            className="w-full border border-gray-300 text-xs rounded-lg px-2.5 py-1.5 bg-white font-medium"
+                          >
+                            <option value="">交換してもらう勤務枠を選択</option>
+                            {targetUserShifts.map((ts, tIdx) => (
+                              <option key={tIdx} value={`${ts.date}_${ts.shift_type}`}>
+                                {ts.date}日（{ts.shift_type}勤）
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                      </div>
+                    )}
+
+                    {/* 実行ボタン */}
+                    {swapMode === "give" ? (
+                      <button
+                        onClick={() => handleGiveShift(shift)}
+                        disabled={isProcessing || !swapTargetUser}
+                        className="w-full bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-xs font-bold py-2 rounded-lg shadow-sm transition"
+                      >
+                        この勤務をあげる
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => handleTradeShift(shift)}
+                        disabled={isProcessing || !swapTargetUser || !tradeTargetShiftKey}
+                        className="w-full bg-purple-700 hover:bg-purple-800 disabled:opacity-50 text-white text-xs font-bold py-2 rounded-lg shadow-sm transition"
+                      >
+                        指定した勤務と交換する
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
             )}
 
+            {/* シフト希望選択 */}
             <div className="space-y-2">
               <p className="text-[11px] text-gray-500 font-semibold mb-1">シフト希望の選択:</p>
               <button
@@ -1421,7 +1557,11 @@ export default function ShiftApp() {
             </div>
 
             <button
-              onClick={() => setSelectedDate(null)}
+              onClick={() => {
+                setSelectedDate(null);
+                setSwapTargetUser("");
+                setTradeTargetShiftKey("");
+              }}
               className="mt-4 w-full text-xs text-gray-400 hover:text-gray-600 text-center"
             >
               閉じる
